@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -21,7 +21,7 @@ type distroCommands struct {
 
 // get the short string version of the operating system eg debian:9
 func getOS() string {
-	b, err := ioutil.ReadFile("/etc/os-release")
+	b, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		log.Fatal(err)
 	}
