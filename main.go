@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -241,7 +240,7 @@ func updateUser(u User) bool {
 
 	keyFile := path.Join(u.Home, ".ssh", "authorized_keys")
 	fileData := []string{}
-	if buf, err := ioutil.ReadFile(keyFile); err == nil {
+	if buf, err := os.ReadFile(keyFile); err == nil {
 		fileData = strings.Split(string(buf), "\n")
 		sort.Strings(fileData)
 	}
@@ -338,7 +337,7 @@ func updateSSHPublicKeys(username string, u User) bool {
 	var buffer bytes.Buffer
 	buffer.WriteString(keyData)
 	os.Mkdir(path.Join(u.Home, ".ssh"), 0700)
-	if err := ioutil.WriteFile(keyFile, buffer.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(keyFile, buffer.Bytes(), 0600); err != nil {
 		log.Printf("Error: Can't write %s file for user %s: %s", keyFile, username, err)
 	}
 	// os.Chown isn't working, not sure why, use native chown instead
