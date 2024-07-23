@@ -37,6 +37,7 @@ var (
 	debug   bool
 	realm   string
 	repo    string
+	hook    hookExecutor
 	distro  distroCommands
 	version string
 	help    bool
@@ -47,8 +48,10 @@ func init() {
 	version = "v1.21"
 	log.SetPrefix("userd " + version + " ")
 
+	hookCommand := ""
 	flag.StringVar(&realm, "realm", "", "the instance's realm eg: dev, stage, prod")
 	flag.StringVar(&repo, "repo", "", "git repo where users are stored")
+	flag.StringVar(&hookCommand, "hook", "", "trigger action at certain points in userd execution")
 	flag.BoolVar(&debug, "debug", false, "print debugging info")
 	flag.BoolVar(&help, "help", false, "print version")
 	flag.Parse()
@@ -72,6 +75,12 @@ func init() {
 		log.Fatal("Unable to detect operating system")
 	}
 	distro = getOSCommands(v)
+
+	if h, err := getHookExecutor(hookCommand); err != nil {
+		log.Fatalf("Error: %v", err)
+	} else {
+		hook = h
+	}
 }
 
 // for debugging
@@ -89,18 +98,22 @@ func gitClone(repo string) *object.FileIter {
 		Depth: 1,
 	})
 	if err != nil {
+		hook.Exec(evtErrGitOps, "clone", repo, err.Error())
 		log.Fatal("git clone ", repo, ": Error: ", err)
 	}
 	ref, err := r.Head()
 	if err != nil {
+		hook.Exec(evtErrGitOps, "head", repo, err.Error())
 		log.Fatal("git clone ", repo, " Can't get head: Error: ", err)
 	}
 	commit, err := r.CommitObject(ref.Hash())
 	if err != nil {
+		hook.Exec(evtErrGitOps, "hash", repo, err.Error())
 		log.Fatal("git clone ", repo, " Can't get commit: Error: ", err)
 	}
 	tree, err := commit.Tree()
 	if err != nil {
+		hook.Exec(evtErrGitOps, "files", repo, err.Error())
 		log.Fatal("git clone ", repo, " Can't get files: Error: ", err)
 	}
 	return tree.Files()
@@ -109,30 +122,34 @@ func gitClone(repo string) *object.FileIter {
 // gather all the users together who are meant to be in this instance's realm
 func gatherUsers(files *object.FileIter) (users []User) {
 	files.ForEach(func(f *object.File) error {
-		var u User
 		if len(f.Name) > 5 && strings.ToLower(f.Name[len(f.Name)-5:]) == ".json" {
 			content, _ := f.Contents()
 			compact := strings.Join(strings.Fields(content), "")
-			err := json.Unmarshal([]byte(content), &u)
-			if err != nil {
+			u := User{}
+			if err := json.Unmarshal([]byte(content), &u); err != nil {
 				log.Printf("%s: Error: Parse or type error in JSON: %s", f.Name, compact)
-			} else if u.Username == "" {
-				log.Printf("%s: Error: Missing 'username' in JSON: %s", f.Name, compact)
-			} else {
-				if u.Home == "" {
-					u.Home = path.Clean("/home/" + u.Username)
-				} else {
-					u.Home = path.Clean(u.Home)
-				}
-				if u.Shell == "" {
-					u.Shell = "/bin/bash"
-				} else {
-					u.Shell = path.Clean(u.Shell)
-				}
-				// sort them now, to make string comparisons simpler later on
-				sort.Strings(u.SSHKeys)
-				users = append(users, u)
+				hook.Exec(evtWarnJSON, f.Name, err.Error())
+				return nil
 			}
+			if u.Username == "" {
+				log.Printf("%s: Error: Missing 'username' in JSON: %s", f.Name, compact)
+				hook.Exec(evtWarnJSON, f.Name, "Missing 'username'")
+				return nil
+			}
+
+			if u.Home == "" {
+				u.Home = path.Clean("/home/" + u.Username)
+			} else {
+				u.Home = path.Clean(u.Home)
+			}
+			if u.Shell == "" {
+				u.Shell = "/bin/bash"
+			} else {
+				u.Shell = path.Clean(u.Shell)
+			}
+			// sort them now, to make string comparisons simpler later on
+			sort.Strings(u.SSHKeys)
+			users = append(users, u)
 		}
 		return nil
 	})
@@ -154,7 +171,6 @@ func removeInvalidGroups(u *User, realm string) {
 	//  ]
 	goodGroups := []string{}
 	for _, g := range u.Groups {
-
 		// if group:realm format
 		if gr := strings.Split(g, ":"); len(gr) > 1 {
 			if !inRangePattern(realm, gr[1:]) {
@@ -192,8 +208,10 @@ func createUser(u User) bool {
 	log.Printf("Creating user: %s", u.Username)
 	if out, err := distro.addUser(u.Username, u.Home); err != nil {
 		log.Printf("Error: Can't create user: %s: %s %s", u.Username, err, out)
+		hook.Exec(evtErrUserAdd, u.Username, err.Error())
 		return false
 	}
+	hook.Exec(evtUserAdd, u.Username)
 	return true
 }
 
@@ -202,8 +220,10 @@ func deleteUser(username string) bool {
 	log.Printf("Deleting user: %s", username)
 	if out, err := distro.delUser(username); err != nil {
 		log.Printf("Error: Can't delete user: %s: %s %s", username, err, out)
+		hook.Exec(evtErrUserDel, username, err.Error(), string(out))
 		return false
 	}
+	hook.Exec(evtUserDel, username)
 	return true
 }
 
@@ -255,8 +275,10 @@ func updateShell(username string, shell string) bool {
 	log.Printf("Updating shell for %s to %s", username, shell)
 	if out, err := distro.changeShell(username, shell); err != nil {
 		log.Printf("Error: Can't update shell for %s: %s %s", username, err, out)
+		hook.Exec(evtErrUserMod, username, "updateShell", err.Error())
 		return false
 	}
+	hook.Exec(evtUserMod, username, "updateShell")
 	return true
 }
 
@@ -266,8 +288,10 @@ func updatePassword(username string, password string) bool {
 	info(fmt.Sprintf("New password: %s", password))
 	if out, err := distro.changePassword(username, password); err != nil {
 		log.Printf("Error: Can't update password for %s: %s %s", username, err, out)
+		hook.Exec(evtErrUserMod, username, "updatePassword", err.Error())
 		return false
 	}
+	hook.Exec(evtUserMod, username, "updatePassword")
 	return true
 }
 
@@ -276,8 +300,10 @@ func updateHome(username string, home string) bool {
 	log.Printf("Updating home dir for %s to %s", username, home)
 	if out, err := distro.changeHomeDir(username, home); err != nil {
 		log.Printf("Error: Can't update home dir for %s: %s %s", username, err, out)
+		hook.Exec(evtErrUserMod, username, "updateHome", err.Error())
 		return false
 	}
+	hook.Exec(evtUserMod, username, "updateHome")
 	return true
 }
 
@@ -286,8 +312,10 @@ func updateComment(username string, comment string) bool {
 	log.Printf("Updating comment for %s to %s", username, comment)
 	if out, err := distro.changeComment(username, comment); err != nil {
 		log.Printf("Error: Can't update comment for %s: %s %s", username, err, out)
+		hook.Exec(evtErrUserMod, username, "updateComment", err.Error())
 		return false
 	}
+	hook.Exec(evtUserMod, username, "updateComment")
 	return true
 }
 
